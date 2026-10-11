@@ -79,6 +79,12 @@ Input video: input/videos/test1.mp4 (1530 x 1530, 35 FPS)
   Wall-clock FPS (incl. writing video and preview window): 37.15
   Output: results/videos/final_demo_test1.mp4
 
+Input video: input/videos/test3.mp4 (1530 x 1530, 35 FPS)
+  Frames processed: 736
+  Average processing FPS (read + detect + models + draw): 177.73
+  Wall-clock FPS (incl. writing video and preview window): 38.00
+  Output: results/videos/final_demo_test3.mp4
+
 Input video: input/videos/test4.mp4 (1530 x 1530, 35 FPS)
   Frames processed: 632
   Average processing FPS (read + detect + models + draw): 176.60
@@ -87,8 +93,8 @@ Input video: input/videos/test4.mp4 (1530 x 1530, 35 FPS)
 
 Input video: input/videos/test5.mp4 (1530 x 1530, 35 FPS)
   Frames processed: 632
-  Average processing FPS (read + detect + models + draw): 173.95
-  Wall-clock FPS (incl. writing video and preview window): 37.73
+  Average processing FPS (read + detect + models + draw): 182.54
+  Wall-clock FPS (incl. writing video and preview window): 38.06
   Output: results/videos/final_demo_test5.mp4
 
 Machine: Apple M5, Darwin arm64, Python 3.11.17, OpenCV 4.14.0

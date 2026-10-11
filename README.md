@@ -8,9 +8,7 @@ male and a female fruit fly in a circular arena and, for every frame, estimates:
 - each fly's **orientation** (heading, 0–360°),
 - the **wing angles** of the male (left and right).
 
-It reimplements, in simplified form, the approach of the Stanford CS229 project
-[*Real-time detailed video analysis of fruit flies*](https://github.com/sgherbst/cs229-project)
-by Steven Herbst (MIT license).
+
 
 ## Problem
 
@@ -45,10 +43,19 @@ computed identically. The detector was chosen by measurement; see
 The orientation and wing models follow the Stanford project's approach: rotate the
 fly upright, compute HOG, reduce with PCA, then fit a linear model.
 
-## Dataset
+## Data
 
-The dataset comes from the Stanford CS229 project and is **not included** in this
-repository.
+The full annotated dataset used for training and by `evaluate.py` comes from the
+Stanford CS229 project and is **not included** in this repository. Download it here
+and place it in `./input` (see [Where to put the data](#where-to-put-the-data)):
+
+https://www.dropbox.com/scl/fo/uz5xtijd3faf1a30c0c8g/AJmDGy_7aXzYYHXqCv_YYCk?rlkey=d2gjrsfjstajwmoeja44jl9x0&e=1&dl=0
+
+Two of the test videos are included in `sample_videos/` (`test5.mp4`, 2.7 MB, and
+`test3.mp4`, 3.5 MB; identical copies of the dataset's videos). They are enough to
+run the demo with the trained models in `models/`, but not to train or evaluate.
+
+The full dataset contains:
 
 - **326 annotated images** in **5 recording sessions** (one folder per session):
 
@@ -82,6 +89,14 @@ conda activate cs229-project
 pip install -r requirements.txt
 ```
 
+Or with a plain virtual environment (Python 3.11):
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
 ### Where to put the data
 
 Place the dataset in `./input` at the repository root. A symlink to an existing
@@ -102,7 +117,23 @@ input/
 
 `input/` is git-ignored. Never commit it.
 
+## Run the demo
+
+The trained models and a sample video are in the repository, so the demo runs
+straight from a fresh clone, without the dataset:
+
+```bash
+python main.py --video sample_videos/test5.mp4
+```
+
+This opens a preview window (press Q to stop) and writes the annotated video to
+`results/videos/final_demo_test5.mp4`. On a machine without a display, add
+`--no-display`; for a quick check, add `--max-frames 50`. Use
+`--video sample_videos/test3.mp4` for the second sample.
+
 ## How to run
+
+The steps below need the full dataset in `./input` (see [Data](#data)).
 
 Run every command from the repository root, in this order:
 
@@ -129,13 +160,6 @@ python main.py --h264                           # also write an H.264 copy for P
 
 # 5. Regenerate results/metrics/model_results.txt from steps 2 and 4
 python make_report.py
-```
-
-Optional experiments (their outputs are committed):
-
-```bash
-python eval_detectors.py            # detector candidates -> results/metrics/detector_experiments.md
-python eval_orientation_by_sex.py   # per-sex orientation, old vs new detector
 ```
 
 Each trainer prints a grouped hold-out check, then saves a model fit on all its
@@ -207,9 +231,11 @@ outside the arena floor as one huge blob touching the image border. Flies that
 touched the floor's edge merged with it and were discarded, so the video fly count
 was wrong in 28.7% of frames (test3: 82.5%).
 
-`eval_detectors.py` tried the original project's settings one switch at a time. For
-each one it retrained the count model and re-ran the videos and the
-leave-one-session-out evaluation (`results/metrics/detector_experiments.md`):
+The comparison below is recorded in `results/metrics/detector_experiments.md`. The
+original project's settings were tried one switch at a time; for each, the count
+model was retrained and the videos and the leave-one-session-out evaluation were
+re-run. These results were produced by earlier experiment scripts that are not part
+of the final repository (they are available in the git history).
 
 | Candidate | Video count = 2 | Sex (LOSO) | Orientation error (LOSO) |
 |---|---|---|---|
@@ -284,32 +310,75 @@ No threshold was tuned on the videos.
 
 ```text
 fruit-fly-video-analysis/
-├── main.py                     entry point (--video, --max-frames, --no-display, --h264)
-├── evaluate.py                 random / GroupKFold / leave-one-session-out evaluation
-├── eval_video_counts.py        frame-level fly count on the test videos
-├── eval_detectors.py           detector experiments
-├── eval_orientation_by_sex.py  per-sex orientation, old vs new detector
-├── make_report.py              writes results/metrics/model_results.txt
-├── audit_phase1.py             checks behind results/metrics/audit.md
+├── README.md
+├── requirements.txt
+├── .gitignore
+├── main.py                       entry point (--video, --max-frames, --no-display, --h264)
+├── evaluate.py                   random / GroupKFold / leave-one-session-out evaluation
+├── eval_video_counts.py          frame-level fly count on the test videos
+├── make_report.py                writes results/metrics/model_results.txt
+├── sample_videos/                test5.mp4, test3.mp4 for the demo (see Data)
 ├── src/
-│   ├── detection.py            arena mask + thresholding + contours + moment axis
-│   ├── features.py             shared count / upright-patch / HOG / wing-half features
-│   ├── annotations.py          loading of labelme JSON + matching flies to contours
-│   ├── model_io.py             save guard: each trainer may only write its own model
-│   ├── pipeline.py             video pipeline
-│   └── ...                     earlier exploratory scripts (fly_count.py is deprecated)
+│   ├── detection.py              arena mask + thresholding + contours + moment axis
+│   ├── features.py               shared count / upright-patch / HOG / wing-half features
+│   ├── annotations.py            loading of labelme JSON + matching flies to contours
+│   ├── model_io.py               save guard: each trainer may only write its own model
+│   ├── pipeline.py               video pipeline
+│   ├── analyze_annotations.py    legacy (see below)
+│   ├── build_dataset.py          legacy
+│   ├── check_dataset.py          legacy
+│   ├── feature_engineering.py    legacy
+│   ├── fly_count.py              legacy (deprecated, circular labels)
+│   ├── inspect_annotation.py     legacy
+│   ├── inspect_shapes.py         legacy
+│   ├── orientation.py            legacy
+│   ├── preprocessing.py          legacy
+│   ├── sex_classifier.py         legacy
+│   ├── video_test.py             legacy
+│   ├── visualize_annotations.py  legacy
+│   └── wing_angle.py             legacy
 ├── train/
 │   ├── train_fly_count.py
 │   ├── train_sex.py
 │   ├── train_orientation.py
 │   └── train_wing_angle.py
-├── models/                     trained models (*.pkl)
+├── models/
+│   ├── fly_count_model.pkl
+│   ├── sex_model.pkl
+│   ├── orientation_model.pkl
+│   └── wing_angle_model.pkl
 └── results/
-    ├── metrics/                evaluation, video counts, experiments, reports, audit
+    ├── metrics/
+    │   ├── evaluation.csv, evaluation.md      evaluate.py
+    │   ├── video_counts.md                    eval_video_counts.py
+    │   ├── fly_count_tree.txt                 train/train_fly_count.py
+    │   ├── model_results.txt                  make_report.py
+    │   ├── pipeline_stats/                    main.py: test1.json, test3.json, test4.json, test5.json
+    │   ├── audit.md                           initial audit (earlier script, see git history)
+    │   ├── detector_experiments.csv           detector comparison (earlier script)
+    │   ├── detector_experiments.md            same, as a table
+    │   ├── orientation_by_sex.md              per-sex orientation (earlier script)
+    │   └── before_detector_fix/               all metrics with the old Otsu detector:
+    │                                          evaluation.csv, evaluation.md, fly_count_tree.txt,
+    │                                          model_results.txt, video_counts.md
     ├── plots/
-    ├── debug/                  per-frame CSV + failure frames (git-ignored)
-    └── videos/                 final_demo_<video>.mp4 (git-ignored)
+    │   ├── orientation_pca.png
+    │   ├── wing_pca.png
+    │   └── model_accuracy.png                 original (invalid) accuracies, kept for comparison
+    ├── debug/                                 per-frame CSV + failure frames (git-ignored)
+    └── videos/                                final_demo_<video>.mp4 (git-ignored)
 ```
+
+### Legacy files
+
+These files in `src/` are from the original implementation. The current pipeline,
+trainers and evaluation scripts do not import or run them; they are kept for
+reference only:
+
+`analyze_annotations.py`, `build_dataset.py`, `check_dataset.py`,
+`feature_engineering.py`, `fly_count.py`, `inspect_annotation.py`,
+`inspect_shapes.py`, `orientation.py`, `preprocessing.py`, `sex_classifier.py`,
+`video_test.py`, `visualize_annotations.py`, `wing_angle.py`.
 
 ## Credits
 
