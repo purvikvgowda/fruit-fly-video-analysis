@@ -1,14 +1,42 @@
 import cv2
-import time
+import json
 import math
+import platform
+import shlex
+import shutil
+import subprocess
+import time
 import joblib
 import numpy as np
 
 from pathlib import Path
 
+from src.detection import (
+    find_candidates,
+    orientation_from_contour
+)
+from src.features import (
+    count_features,
+    orientation_features,
+    to_gray,
+    wing_features
+)
+
 
 VIDEO_PATH = "input/videos/test1.mp4"
-OUTPUT_PATH = "results/videos/final_demo.mp4"
+OUTPUT_DIR = Path("results/videos")
+STATS_DIR = Path("results/metrics/pipeline_stats")
+
+
+def output_paths(video_path):
+    """Annotated video and timing file, named after the input video."""
+
+    stem = Path(video_path).stem
+
+    return (
+        OUTPUT_DIR / f"final_demo_{stem}.mp4",
+        STATS_DIR / f"{stem}.json"
+    )
 
 FLY_COUNT_MODEL = "models/fly_count_model.pkl"
 SEX_MODEL = "models/sex_model.pkl"
@@ -43,128 +71,37 @@ def load_models():
     return models
 
 
-def detect_flies(frame):
+def predict_fly_count(
+    model,
+    candidates
+):
+    """
+    Predict the number of flies in every contour.
 
-    gray = cv2.cvtColor(
-        frame,
-        cv2.COLOR_BGR2GRAY
+    Returns the frame's fly count (sum over contours) and the contours
+    that contain at least one fly, each tagged with "fly_count".
+    """
+
+    if not candidates:
+        return 0, []
+
+    counts = model.predict(
+        np.array([
+            count_features(candidate)
+            for candidate in candidates
+        ])
     )
 
-    blurred = cv2.GaussianBlur(
-        gray,
-        (5, 5),
-        0
-    )
+    flies = []
 
-    _, binary = cv2.threshold(
-        blurred,
-        0,
-        255,
-        cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
-    )
+    for candidate, count in zip(candidates, counts):
 
-    contours, _ = cv2.findContours(
-        binary,
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE
-    )
+        candidate["fly_count"] = int(count)
 
-    candidates = []
+        if count > 0:
+            flies.append(candidate)
 
-    height, width = binary.shape
-
-    for contour in contours:
-
-        area = cv2.contourArea(
-            contour
-        )
-
-        if area < 500:
-            continue
-
-        x, y, w, h = cv2.boundingRect(
-            contour
-        )
-
-        if (
-            x <= 0
-            or y <= 0
-            or x + w >= width
-            or y + h >= height
-        ):
-            continue
-
-        if h == 0:
-            continue
-
-        moments = cv2.moments(
-            contour
-        )
-
-        if moments["m00"] == 0:
-            continue
-
-        center_x = (
-            moments["m10"] /
-            moments["m00"]
-        )
-
-        center_y = (
-            moments["m01"] /
-            moments["m00"]
-        )
-
-        candidates.append({
-            "contour": contour,
-            "area": area,
-            "x": x,
-            "y": y,
-            "width": w,
-            "height": h,
-            "aspect_ratio": w / h,
-            "center_x": center_x,
-            "center_y": center_y
-        })
-
-    candidates.sort(
-        key=lambda item: item["area"],
-        reverse=True
-    )
-
-    return candidates[:2]
-
-
-def orientation_from_contour(contour):
-
-    moments = cv2.moments(
-        contour
-    )
-
-    denominator = (
-        moments["mu20"] -
-        moments["mu02"]
-    )
-
-    numerator = (
-        2 * moments["mu11"]
-    )
-
-    if denominator == 0 and numerator == 0:
-        return 0.0
-
-    angle = 0.5 * math.atan2(
-        numerator,
-        denominator
-    )
-
-    angle = math.degrees(
-        angle
-    )
-
-    if angle < 0:
-        angle += 180
-
-    return angle
+    return int(np.sum(counts)), flies
 
 
 def predict_sex(
@@ -189,83 +126,214 @@ def predict_sex(
 
 def predict_orientation(
     model,
-    contour
+    gray,
+    fly
 ):
+    """
+    Heading of the fly (abdomen -> head) in image-coordinate degrees.
 
-    base_angle = orientation_from_contour(
-        contour
+    The moment axis gives the body line; the flip classifier (HOG of the
+    upright patch -> PCA -> LogisticRegression) decides which end is the
+    head. Same feature code as train/train_orientation.py.
+    """
+
+    axis = orientation_from_contour(
+        fly["contour"]
     )
 
-    # The trained orientation model expects
-    # six geometric features. For the video demo,
-    # unavailable landmark features are approximated
-    # from the contour orientation.
+    features = orientation_features(
+        gray,
+        fly,
+        axis
+    )
 
-    features = np.array([[
-        1.0,
-        1.0,
-        1.0,
-        base_angle,
-        base_angle,
-        0.0
-    ]])
-
-    try:
-
-        prediction = model.predict(
-            features
+    flip = int(
+        model.predict(
+            features.reshape(1, -1)
         )[0]
+    )
 
-        if prediction == 1:
-            return base_angle + 180
+    return (axis + 180 * flip) % 360
 
-        return base_angle
 
-    except Exception:
+def display_angle(heading):
+    """Image-coordinate heading -> counter-clockwise degrees (y up)."""
 
-        return base_angle
+    return (-heading) % 360
+
+
+def draw_heading(
+    image,
+    fly,
+    heading,
+    length=60
+):
+
+    start = (
+        int(fly["center_x"]),
+        int(fly["center_y"])
+    )
+
+    end = (
+        int(start[0] + length * math.cos(math.radians(heading))),
+        int(start[1] + length * math.sin(math.radians(heading)))
+    )
+
+    cv2.arrowedLine(
+        image,
+        start,
+        end,
+        (0, 0, 255),
+        2,
+        tipLength=0.3
+    )
 
 
 def predict_wing_angle(
     model,
-    fly
+    gray,
+    fly,
+    heading
 ):
+    """
+    Right and left wing angles (deg, 0-90) of a male fly.
 
-    # The training model expects geometric wing
-    # features that are not directly available
-    # from a simple contour.
-    #
-    # Use a neutral approximation for the video
-    # integration layer.
+    The patch is rotated upright with the predicted heading, split into
+    halves (left half mirrored), and each half goes through
+    HOG -> PCA -> LinearRegression, as in train/train_wing_angle.py.
+    """
 
-    features = np.array([[
-        fly["height"],
-        fly["height"] * 0.5,
-        fly["height"] * 0.5,
-        0.5,
-        0.5,
-        0.5,
-        0.0,
-        1.0
-    ]])
+    right, left = wing_features(
+        gray,
+        fly,
+        heading
+    )
 
-    try:
+    angles = np.clip(
+        model.predict(
+            np.array([right, left])
+        ),
+        0,
+        90
+    )
 
-        prediction = model.predict(
-            features
+    return float(angles[0]), float(angles[1])
+
+
+LABEL_FONT = cv2.FONT_HERSHEY_SIMPLEX
+LABEL_SCALE = 0.7
+LABEL_THICKNESS = 2
+LABEL_PADDING = 6
+LABEL_LINE_GAP = 8
+
+
+def overlaps(a, b):
+    """True if rectangles a and b, given as (left, top, right, bottom), overlap."""
+
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def draw_text_block(
+    image,
+    lines,
+    box,
+    placed=None
+):
+    """
+    Draw white text lines on a filled dark rectangle next to a fly.
+
+    The block goes just above the fly's bounding box (x, y, w, h), or
+    below it if there is no room above or that spot overlaps a block in
+    `placed` (blocks already drawn in this frame). If both spots are
+    taken it is pushed down until it is clear. It is always clamped
+    fully inside the frame, and its rectangle is appended to `placed`.
+    """
+
+    if placed is None:
+        placed = []
+
+    frame_height, frame_width = image.shape[:2]
+
+    sizes = [
+        cv2.getTextSize(
+            text,
+            LABEL_FONT,
+            LABEL_SCALE,
+            LABEL_THICKNESS
         )[0]
+        for text in lines
+    ]
 
-        return float(
-            np.clip(
-                prediction,
-                0,
-                90
-            )
+    line_height = max(size[1] for size in sizes) + LABEL_LINE_GAP
+
+    block_width = max(size[0] for size in sizes) + 2 * LABEL_PADDING
+    block_height = line_height * len(lines) + 2 * LABEL_PADDING
+
+    x, y, w, h = box
+
+    left = min(max(x, 0), frame_width - block_width)
+
+    def rect(top):
+        top = min(max(top, 0), frame_height - block_height)
+        return (left, top, left + block_width, top + block_height)
+
+    above = y - block_height - 6
+    below = y + h + 6
+
+    candidates = [rect(below), rect(above)] if above < 0 else [rect(above), rect(below)]
+
+    chosen = next(
+        (
+            candidate for candidate in candidates
+            if not any(overlaps(candidate, other) for other in placed)
+        ),
+        None
+    )
+
+    if chosen is None:
+
+        chosen = candidates[0]
+
+        while any(overlaps(chosen, other) for other in placed):
+
+            lowest = max(other[3] for other in placed if overlaps(chosen, other))
+
+            if lowest + 2 + block_height > frame_height:
+                break
+
+            chosen = rect(lowest + 2)
+
+    placed.append(chosen)
+
+    left, top = chosen[0], chosen[1]
+
+    cv2.rectangle(
+        image,
+        (left, top),
+        (left + block_width, top + block_height),
+        (30, 30, 30),
+        -1
+    )
+
+    for line_number, text in enumerate(lines):
+
+        baseline_y = (
+            top +
+            LABEL_PADDING +
+            (line_number + 1) * line_height -
+            LABEL_LINE_GAP // 2
         )
 
-    except Exception:
-
-        return 0.0
+        cv2.putText(
+            image,
+            text,
+            (left + LABEL_PADDING, baseline_y),
+            LABEL_FONT,
+            LABEL_SCALE,
+            (255, 255, 255),
+            LABEL_THICKNESS,
+            cv2.LINE_AA
+        )
 
 
 def draw_results(
@@ -276,6 +344,10 @@ def draw_results(
 ):
 
     result = frame.copy()
+
+    placed_labels = []
+
+    gray = to_gray(frame)
 
     for index, fly in enumerate(flies):
 
@@ -298,20 +370,61 @@ def draw_results(
         # ML predictions
         # -----------------------------------------------------
 
-        sex = predict_sex(
-            models["sex"],
-            fly
-        )
+        # A contour predicted to hold two touching flies cannot be
+        # split, so per-fly models are not run on it.
 
-        orientation = predict_orientation(
-            models["orientation"],
-            contour
-        )
+        if fly["fly_count"] == 1:
 
-        wing_angle = predict_wing_angle(
-            models["wing"],
-            fly
-        )
+            sex = predict_sex(
+                models["sex"],
+                fly
+            )
+
+            heading = predict_orientation(
+                models["orientation"],
+                gray,
+                fly
+            )
+
+            draw_heading(
+                result,
+                fly,
+                heading
+            )
+
+            # The wing model is trained on male flies only.
+
+            if sex == "Male":
+
+                right_wing, left_wing = predict_wing_angle(
+                    models["wing"],
+                    gray,
+                    fly,
+                    heading
+                )
+
+                wing_text = (
+                    f"Wings R/L: {right_wing:.0f} / "
+                    f"{left_wing:.0f} deg"
+                )
+
+            else:
+
+                wing_text = "Wings: n/a (female)"
+
+            information = [
+                f"Fly {index + 1}",
+                f"Sex: {sex}",
+                f"Orientation: {display_angle(heading):.1f} deg",
+                wing_text
+            ]
+
+        else:
+
+            information = [
+                f"Blob {index + 1}: "
+                f"{fly['fly_count']} flies touching"
+            ]
 
         # -----------------------------------------------------
         # Draw contour
@@ -345,36 +458,12 @@ def draw_results(
         # Text
         # -----------------------------------------------------
 
-        label_y = max(
-            y - 100,
-            20
+        draw_text_block(
+            result,
+            information,
+            (x, y, w, h),
+            placed_labels
         )
-
-        information = [
-            f"Fly {index + 1}",
-            f"Sex: {sex}",
-            f"Orientation: {orientation:.1f} deg",
-            f"Wing angle: {wing_angle:.1f} deg"
-        ]
-
-        for line_number, text in enumerate(
-            information
-        ):
-
-            cv2.putText(
-                result,
-                text,
-                (
-                    x,
-                    label_y +
-                    line_number * 22
-                ),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 255, 255),
-                1,
-                cv2.LINE_AA
-            )
 
     # ---------------------------------------------------------
     # Main information panel
@@ -413,11 +502,79 @@ def draw_results(
     return result
 
 
-def main():
+def reencode_h264(path):
+    """
+    Re-encode a video to H.264 / yuv420p (plays in PowerPoint, browsers
+    and QuickTime) with ffmpeg. If ffmpeg is not installed, print the
+    exact command instead. Returns the new path, or None.
+    """
+
+    source = Path(path)
+    target = source.with_name(source.stem + "_h264.mp4")
+
+    command = [
+        "ffmpeg", "-y",
+        "-i", str(source),
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-crf", "20",
+        "-preset", "medium",
+        "-movflags", "+faststart",
+        str(target)
+    ]
+
+    if shutil.which("ffmpeg") is None:
+        print("\nffmpeg is not installed. To make an H.264 copy, install it")
+        print("(e.g. brew install ffmpeg) and run:")
+        print("  " + shlex.join(command))
+        return None
+
+    print("\nRe-encoding to H.264:", target)
+
+    subprocess.run(command, check=True, capture_output=True)
+
+    return target
+
+
+def machine_description():
+
+    cpu = platform.processor() or "unknown CPU"
+
+    if platform.system() == "Darwin":
+        try:
+            cpu = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                capture_output=True,
+                text=True,
+                check=True
+            ).stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            pass
+
+    return (
+        f"{cpu}, {platform.system()} {platform.machine()}, "
+        f"Python {platform.python_version()}, OpenCV {cv2.__version__}"
+    )
+
+
+def main(
+    video_path=VIDEO_PATH,
+    max_frames=None,
+    display=True,
+    h264=False
+):
+    """
+    Run all models on a video and write the annotated output.
+
+    max_frames stops early (quick smoke test); display=False skips the
+    preview window. Timing is written to results/metrics/pipeline_stats.json.
+    """
 
     print("=" * 70)
     print("FRUIT FLY ML VIDEO ANALYSIS")
     print("=" * 70)
+
+    output_path, stats_path = output_paths(video_path)
 
     Path(
         "results/videos"
@@ -437,7 +594,7 @@ def main():
     # ---------------------------------------------------------
 
     cap = cv2.VideoCapture(
-        VIDEO_PATH
+        video_path
     )
 
     if not cap.isOpened():
@@ -495,7 +652,7 @@ def main():
     )
 
     writer = cv2.VideoWriter(
-        OUTPUT_PATH,
+        str(output_path),
         fourcc,
         fps,
         (width, height)
@@ -513,7 +670,7 @@ def main():
 
     print(
         "\nOutput:",
-        OUTPUT_PATH
+        output_path
     )
 
     print(
@@ -526,8 +683,9 @@ def main():
 
     frame_count = 0
     total_time = 0.0
+    wall_start = time.perf_counter()
 
-    while True:
+    while max_frames is None or frame_count < max_frames:
 
         start = time.perf_counter()
 
@@ -536,44 +694,14 @@ def main():
         if not ret:
             break
 
-        flies = detect_flies(
-            frame
-        )
-
         # -----------------------------------------------------
-        # Fly-count model
+        # Fly-count model: one prediction per detected contour
+        # (0, 1 or 2 flies); the frame count is their sum.
         # -----------------------------------------------------
 
-        count_features = []
-
-        for i in range(2):
-
-            if i < len(flies):
-
-                fly = flies[i]
-
-                count_features.extend([
-                    fly["area"],
-                    fly["width"],
-                    fly["height"],
-                    fly["aspect_ratio"]
-                ])
-
-            else:
-
-                count_features.extend([
-                    0,
-                    0,
-                    0,
-                    0
-                ])
-
-        count_prediction = int(
-            models["count"].predict(
-                np.array([
-                    count_features
-                ])
-            )[0]
+        count_prediction, flies = predict_fly_count(
+            models["count"],
+            find_candidates(frame)
         )
 
         # -----------------------------------------------------
@@ -602,34 +730,35 @@ def main():
             else 0
         )
 
-        cv2.putText(
+        draw_text_block(
             result,
-            f"Processing FPS: {processing_fps:.1f}",
-            (20, height - 25),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (0, 255, 255),
-            2,
-            cv2.LINE_AA
+            [f"Processing FPS: {processing_fps:.1f}"],
+            (10, height, 0, 0)
         )
 
         writer.write(
             result
         )
 
-        cv2.imshow(
-            "Fruit Fly ML Analysis",
-            result
-        )
+        if display:
 
-        key = cv2.waitKey(1) & 0xFF
+            cv2.imshow(
+                "Fruit Fly ML Analysis",
+                result
+            )
 
-        if key == ord("q"):
-            break
+            key = cv2.waitKey(1) & 0xFF
+
+            if key == ord("q"):
+                break
+
+    wall_time = time.perf_counter() - wall_start
 
     cap.release()
     writer.release()
-    cv2.destroyAllWindows()
+
+    if display:
+        cv2.destroyAllWindows()
 
     average_fps = (
         frame_count /
@@ -655,14 +784,50 @@ def main():
         frame_count
     )
 
+    wall_fps = (
+        frame_count /
+        wall_time
+        if wall_time > 0
+        else 0
+    )
+
+    # Processing FPS times read + detection + all models + drawing;
+    # wall-clock FPS also includes writing the video and the preview.
+
     print(
         "Average processing FPS:",
         f"{average_fps:.2f}"
     )
 
     print(
+        "Wall-clock FPS (incl. video writing/display):",
+        f"{wall_fps:.2f}"
+    )
+
+    stats = {
+        "video": str(video_path),
+        "resolution": f"{width} x {height}",
+        "input_fps": fps,
+        "frames_processed": frame_count,
+        "max_frames": max_frames,
+        "display": display,
+        "processing_fps": round(average_fps, 2),
+        "wall_clock_fps": round(wall_fps, 2),
+        "machine": machine_description(),
+        "output": str(output_path)
+    }
+
+    stats_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(stats_path, "w", encoding="utf-8") as file:
+        json.dump(stats, file, indent=2)
+
+    if h264:
+        reencode_h264(output_path)
+
+    print(
         "Output video:",
-        OUTPUT_PATH
+        output_path
     )
 
     print(
